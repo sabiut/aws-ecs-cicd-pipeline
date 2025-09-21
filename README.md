@@ -137,24 +137,23 @@ The Terraform will output the required secrets. Add these to your repositories:
 
 ### 4. Application Repository Setup
 
-Application repositories need minimal workflow files to trigger the CI/CD pipeline. These are already included in the application repositories:
-
-- **Backend**: `.github/workflows/trigger-deploy.yml`
-- **Frontend**: `.github/workflows/trigger-deploy.yml`
+Application repositories are already configured with trigger workflows that automatically dispatch to this CI/CD pipeline when code is pushed. No additional setup is required - the workflows are built into each application repository and will activate automatically once secrets are configured.
 
 ## Deployment Workflow
 
 ### **How it Works:**
 
 1. **Developer pushes code** to application repository (frontend or backend)
-2. **Trigger workflow** runs in application repository
-3. **Repository dispatch event** sent to CI/CD repository
-4. **CI/CD workflow** activates in this repository:
+2. **Built-in trigger workflow** automatically runs in application repository
+3. **Repository dispatch event** automatically sent to this CI/CD repository
+4. **CI/CD workflow** automatically activates in this repository:
    - Checks out code from application repository
    - Uses centralized Dockerfiles and build configs
    - Builds and pushes Docker image to ECR
    - Deploys to ECS Fargate
    - Performs health checks and rollback if needed
+
+**No manual intervention required** - the entire process is automated once secrets are configured.
 
 ### **Deployment Process:**
 1. **Test**: Run linting and tests on application code
