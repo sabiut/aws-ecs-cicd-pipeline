@@ -6,9 +6,9 @@ project_name = "my-app"
 environment  = "dev"
 
 # GitHub Configuration
-github_org           = "your-github-username"
-github_frontend_repo = "my-app-frontend"
-github_backend_repo  = "my-app-backend"
+github_org           = "sabiut"
+github_frontend_repo = "aws-ecs-frontend-react"
+github_backend_repo  = "aws-ecs-backend-django"
 
 # ECS Configuration (must match your existing ECS infrastructure)
 ecs_cluster_name          = "my-app-dev-cluster"
