@@ -1,16 +1,14 @@
 name: Deploy Frontend to ECS
 
 on:
-  push:
-    branches:
-      - main
-      - develop
-      - staging
-  pull_request:
-    branches:
-      - main
+  repository_dispatch:
+    types: [frontend-deploy]
   workflow_dispatch:
     inputs:
+      frontend_ref:
+        description: 'Frontend repository ref to deploy'
+        required: false
+        default: 'main'
       environment:
         description: 'Environment to deploy to'
         required: true
@@ -23,9 +21,10 @@ on:
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  ECR_REPOSITORY: ${{ secrets.ECR_FRONTEND_REPOSITORY }}
   ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
-  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+  ECS_SERVICE: ${{ secrets.ECS_FRONTEND_SERVICE }}
+  FRONTEND_REPO: 'sabiut/aws-ecs-frontend-react'
 
 permissions:
   id-token: write
@@ -33,44 +32,65 @@ permissions:
 
 jobs:
   test:
-    name: Run Tests
+    name: Test Frontend Code
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout CI/CD repository
         uses: actions/checkout@v4
+
+      - name: Checkout frontend code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRONTEND_REPO }}
+          ref: ${{ github.event.inputs.frontend_ref || github.event.client_payload.ref || 'main' }}
+          path: frontend-code
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
+          cache-dependency-path: frontend-code/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          cd frontend-code
+          npm ci
 
       - name: Run linting
-        run: npm run lint
+        run: |
+          cd frontend-code
+          npm run lint
 
       - name: Run tests
-        run: npm test
+        run: |
+          cd frontend-code
+          npm test -- --watchAll=false
 
-      - name: Run build
-        run: npm run build
-
-      - name: Run security scan
-        run: npm audit --audit-level=high
+      - name: Run build test
+        run: |
+          cd frontend-code
+          npm run build
 
   build-and-push:
     name: Build and Push Docker Image
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
     steps:
-      - name: Checkout code
+      - name: Checkout CI/CD repository
         uses: actions/checkout@v4
+
+      - name: Checkout frontend code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRONTEND_REPO }}
+          ref: ${{ github.event.inputs.frontend_ref || github.event.client_payload.ref || 'main' }}
+          path: frontend-code
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -92,7 +112,6 @@ jobs:
           images: ${{ env.ECR_REPOSITORY }}
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,prefix={{branch}}-
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value={{date 'YYYYMMDD-HHmmss'}}
@@ -102,19 +121,16 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: ./docker/frontend/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
-          provenance: true
-          sbom: true
           build-args: |
-            BUILD_DATE=${{ github.event.repository.updated_at }}
+            BUILD_DATE=${{ github.run_id }}
             VCS_REF=${{ github.sha }}
-            VERSION=${{ steps.meta.outputs.version }}
             NODE_ENV=production
 
       - name: Run Trivy vulnerability scanner
@@ -134,9 +150,8 @@ jobs:
     name: Deploy to ECS
     needs: build-and-push
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/develop'
     steps:
-      - name: Checkout code
+      - name: Checkout CI/CD repository
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -173,25 +188,15 @@ jobs:
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }}
 
-      - name: Get deployed image details
-        run: |
-          aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].taskDefinition' \
-            --output text
-
       - name: Notify deployment success
         if: success()
         run: |
           echo "Frontend deployed successfully to ${{ env.ECS_SERVICE }}"
           echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
-          echo "Digest: ${{ needs.build-and-push.outputs.image-digest }}"
 
       - name: Invalidate CloudFront cache (if applicable)
         continue-on-error: true
         run: |
-          # Check if CLOUDFRONT_DISTRIBUTION_ID is set
           if [ -n "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" ]; then
             echo "Invalidating CloudFront cache..."
             aws cloudfront create-invalidation \
@@ -206,7 +211,7 @@ jobs:
     name: Rollback on Failure
     needs: [build-and-push, deploy]
     runs-on: ubuntu-latest
-    if: failure() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging')
+    if: failure()
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

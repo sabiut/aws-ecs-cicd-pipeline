@@ -1,44 +1,60 @@
 # AWS ECS CI/CD Pipeline Infrastructure
 
-This repository contains the CI/CD infrastructure for deploying containerized applications to AWS ECS using GitHub Actions.
+This repository contains the centralized CI/CD infrastructure for deploying containerized applications to AWS ECS using GitHub Actions.
 
 ## Architecture Overview
 
 ```mermaid
 graph TD
-    subgraph GitHub
-        GH_FE[Frontend Repo]
-        GH_BE[Backend Repo]
-        GH_Actions[GitHub Actions]
+    subgraph "Application Repositories"
+        BE_REPO[Backend Code Only<br/>aws-ecs-backend-django]
+        FE_REPO[Frontend Code Only<br/>aws-ecs-frontend-react]
     end
 
-    subgraph AWS
+    subgraph "CI/CD Repository"
+        WORKFLOWS[GitHub Actions Workflows]
+        DOCKERFILES[Dockerfiles & Build Configs]
+        TERRAFORM[Terraform Infrastructure]
+    end
+
+    subgraph "AWS"
         ECR_FE[ECR Frontend]
         ECR_BE[ECR Backend]
         ECS[ECS Fargate Cluster]
         IAM[IAM OIDC Provider]
     end
 
-    GH_FE --> GH_Actions
-    GH_BE --> GH_Actions
-    GH_Actions --> IAM
-    GH_Actions --> ECR_FE
-    GH_Actions --> ECR_BE
+    BE_REPO -->|Push triggers| WORKFLOWS
+    FE_REPO -->|Push triggers| WORKFLOWS
+    WORKFLOWS -->|Checkout code| BE_REPO
+    WORKFLOWS -->|Checkout code| FE_REPO
+    WORKFLOWS -->|Use build configs| DOCKERFILES
+    WORKFLOWS --> ECR_FE
+    WORKFLOWS --> ECR_BE
     ECR_FE --> ECS
     ECR_BE --> ECS
+    TERRAFORM --> IAM
+    TERRAFORM --> ECR_FE
+    TERRAFORM --> ECR_BE
 ```
 
-## Components
+## Key Features
 
-### 1. Terraform Infrastructure
-- **ECR Repositories**: Container registries for frontend and backend images
-- **IAM Roles**: GitHub Actions OIDC authentication for secure AWS access
-- **GitHub Secrets**: Automated secret creation for repository workflows
+### **Centralized Build Management**
+- All Dockerfiles and build configurations are in this CI/CD repository
+- Application repositories contain only source code
+- Consistent build process across all applications
 
-### 2. GitHub Actions Workflows
-- **Backend Deployment**: Build, test, and deploy backend containers
-- **Frontend Deployment**: Build, test, and deploy frontend containers
-- **Rollback Support**: Automated rollback on deployment failure
+### **Repository Dispatch Architecture**
+- Application repositories trigger deployments via repository dispatch events
+- CI/CD workflows checkout code from application repositories
+- Clean separation of concerns between code and deployment
+
+### **Secure Deployment**
+- OIDC authentication (no long-lived AWS credentials)
+- Least privilege IAM policies
+- Automated vulnerability scanning
+- Rollback capabilities
 
 ## Prerequisites
 
@@ -47,6 +63,34 @@ graph TD
 3. GitHub repositories for frontend and backend applications
 4. Terraform installed (>= 1.0)
 5. AWS CLI configured
+
+## Repository Structure
+
+```
+.
+├── .github/
+│   └── workflows/
+│       ├── backend-deploy.yml    # Backend deployment workflow
+│       └── frontend-deploy.yml   # Frontend deployment workflow
+├── docker/
+│   ├── backend/
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   └── frontend/
+│       ├── Dockerfile
+│       ├── package.json
+│       └── next.config.js
+├── terraform/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── terraform.tfvars.example
+│   └── modules/
+│       ├── ecr/
+│       ├── iam/
+│       └── github-secrets/
+└── README.md
+```
 
 ## Setup Instructions
 
@@ -74,120 +118,67 @@ terraform plan
 terraform apply
 ```
 
-### 3. Configure GitHub Repositories
+### 3. Configure GitHub Secrets
 
-The Terraform will output:
-- ECR repository URLs
-- IAM role ARNs
-- Required GitHub secrets
+The Terraform will output the required secrets. Add these to your repositories:
 
-Add these as secrets to your frontend and backend repositories.
+**CI/CD Repository Secrets:**
+- `AWS_REGION`
+- `AWS_ACCOUNT_ID`
+- `AWS_ROLE_ARN`
+- `ECS_CLUSTER`
+- `ECR_FRONTEND_REPOSITORY`
+- `ECR_BACKEND_REPOSITORY`
+- `ECS_FRONTEND_SERVICE`
+- `ECS_BACKEND_SERVICE`
 
-### 4. Add Workflow Files
+**Application Repository Secrets:**
+- `CICD_TRIGGER_TOKEN`: GitHub token with repository dispatch permissions
 
-Copy the appropriate workflow file to your application repositories:
-- Frontend: `.github/workflows/frontend-deploy.yml`
-- Backend: `.github/workflows/backend-deploy.yml`
+### 4. Application Repository Setup
 
-## GitHub Actions Workflow
+Application repositories need minimal workflow files to trigger the CI/CD pipeline. These are already included in the application repositories:
 
-### Triggers
-- Push to `main` branch
-- Pull request to `main` branch
-- Manual dispatch
+- **Backend**: `.github/workflows/trigger-deploy.yml`
+- **Frontend**: `.github/workflows/trigger-deploy.yml`
 
-### Deployment Process
-1. **Build**: Docker image creation
-2. **Test**: Run unit and integration tests
+## Deployment Workflow
+
+### **How it Works:**
+
+1. **Developer pushes code** to application repository (frontend or backend)
+2. **Trigger workflow** runs in application repository
+3. **Repository dispatch event** sent to CI/CD repository
+4. **CI/CD workflow** activates in this repository:
+   - Checks out code from application repository
+   - Uses centralized Dockerfiles and build configs
+   - Builds and pushes Docker image to ECR
+   - Deploys to ECS Fargate
+   - Performs health checks and rollback if needed
+
+### **Deployment Process:**
+1. **Test**: Run linting and tests on application code
+2. **Build**: Create Docker image using centralized configs
 3. **Scan**: Security vulnerability scanning
 4. **Push**: Upload to Amazon ECR
 5. **Deploy**: Update ECS service with new image
 6. **Verify**: Health check validation
+7. **Rollback**: Automatic rollback on failure
 
 ## Environment Configuration
 
 ### Development
 - Auto-deploy on push to `develop` branch
-- Relaxed approval requirements
+- Basic testing requirements
 
 ### Staging
 - Deploy on push to `staging` branch
-- Required manual approval
+- Enhanced testing and validation
 
 ### Production
 - Deploy on push to `main` branch
-- Required manual approval
+- Full testing, security scans, and approval gates
 - Automated rollback on failure
-
-## Security Features
-
-- **OIDC Authentication**: No long-lived AWS credentials
-- **Least Privilege IAM**: Minimal required permissions
-- **Image Scanning**: Automated vulnerability detection
-- **Secret Management**: GitHub Secrets integration
-- **Audit Logging**: CloudTrail integration
-
-## Monitoring
-
-- **GitHub Actions Dashboard**: Workflow execution status
-- **AWS CloudWatch**: Container logs and metrics
-- **ECR Scan Results**: Security vulnerability reports
-
-## Rollback Strategy
-
-Automatic rollback triggers:
-- ECS deployment failure
-- Health check failures
-- Custom metric thresholds
-
-Manual rollback:
-```bash
-# Via GitHub Actions UI
-# Re-run previous successful workflow
-```
-
-## Cost Optimization
-
-- **ECR Lifecycle Policies**: Automatic old image cleanup
-- **On-demand CI/CD**: Resources only used during deployments
-- **GitHub Actions**: Free tier for public repositories
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Permission Denied**
-   - Verify IAM role trust relationship
-   - Check GitHub OIDC thumbprint
-
-2. **ECR Push Failed**
-   - Verify ECR repository exists
-   - Check IAM permissions
-
-3. **ECS Deployment Failed**
-   - Review CloudWatch logs
-   - Verify task definition
-   - Check security groups
-
-## Repository Structure
-
-```
-.
-├── .github/
-│   └── workflows/
-│       ├── backend-deploy.yml
-│       └── frontend-deploy.yml
-├── terraform/
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── terraform.tfvars.example
-│   └── modules/
-│       ├── ecr/
-│       ├── iam/
-│       └── github-secrets/
-└── README.md
-```
 
 ## Related Repositories
 
@@ -203,14 +194,52 @@ This CI/CD infrastructure works with the following repositories:
 **Deployment Order:**
 1. **Deploy ECS Infrastructure** from [terraform-aws-ecs-infra](https://github.com/sabiut/terraform-aws-ecs-infra) first
 2. **Deploy this CI/CD infrastructure** (configure with matching ECS names)
-3. **Configure GitHub secrets** for both application repositories
-4. **Push to application repositories** to trigger deployments
+3. **Configure GitHub secrets** for all repositories
+4. **Push to application repositories** to trigger automated deployments
+
+## Manual Deployment
+
+You can manually trigger deployments via GitHub Actions UI:
+
+1. Go to Actions tab in this repository
+2. Select "Deploy Backend to ECS" or "Deploy Frontend to ECS"
+3. Click "Run workflow"
+4. Specify the branch/ref from the application repository to deploy
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Repository Dispatch Not Working**
+   - Verify `CICD_TRIGGER_TOKEN` has repository dispatch permissions
+   - Check token scope includes the CI/CD repository
+
+2. **Code Checkout Fails**
+   - Verify application repository is accessible
+   - Check branch/ref exists in application repository
+
+3. **Build Fails**
+   - Check Dockerfiles in `docker/` directory
+   - Verify build configurations match application structure
+
+4. **Deployment Fails**
+   - Verify ECS cluster and service names match
+   - Check AWS permissions and role trust relationship
+
+## Security Features
+
+- **OIDC Authentication**: No long-lived AWS credentials
+- **Least Privilege IAM**: Minimal required permissions
+- **Image Scanning**: Automated vulnerability detection
+- **Secret Management**: GitHub Secrets integration
+- **Audit Logging**: CloudTrail integration
+- **Code Separation**: Application code never mixed with deployment configs
 
 ## Contributing
 
 1. Create feature branch
-2. Make changes
-3. Test locally
+2. Make changes to workflows or infrastructure
+3. Test with manual deployment
 4. Submit pull request
 
 ## Support
