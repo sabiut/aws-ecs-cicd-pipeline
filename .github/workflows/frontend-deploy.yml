@@ -1,0 +1,245 @@
+name: Deploy Frontend to ECS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linting
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run build
+        run: npm run build
+
+      - name: Run security scan
+        run: npm audit --audit-level=high
+
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value={{date 'YYYYMMDD-HHmmss'}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          provenance: true
+          sbom: true
+          build-args: |
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+            NODE_ENV=production
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  deploy:
+    name: Deploy to ECS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --query taskDefinition > task-definition.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: frontend
+          image: ${{ needs.build-and-push.outputs.image-tag }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Verify deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+
+      - name: Get deployed image details
+        run: |
+          aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].taskDefinition' \
+            --output text
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "✅ Frontend deployed successfully to ${{ env.ECS_SERVICE }}"
+          echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
+          echo "Digest: ${{ needs.build-and-push.outputs.image-digest }}"
+
+      - name: Invalidate CloudFront cache (if applicable)
+        continue-on-error: true
+        run: |
+          # Check if CLOUDFRONT_DISTRIBUTION_ID is set
+          if [ -n "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" ]; then
+            echo "Invalidating CloudFront cache..."
+            aws cloudfront create-invalidation \
+              --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+              --paths "/*"
+            echo "✅ CloudFront cache invalidated"
+          else
+            echo "ℹ️ No CloudFront distribution configured"
+          fi
+
+  rollback:
+    name: Rollback on Failure
+    needs: [build-and-push, deploy]
+    runs-on: ubuntu-latest
+    if: failure() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging')
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get previous task definition
+        run: |
+          PREV_TASK_DEF=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].previousTaskDefinition' \
+            --output text)
+
+          if [ "$PREV_TASK_DEF" != "None" ]; then
+            echo "Rolling back to: $PREV_TASK_DEF"
+            aws ecs update-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service ${{ env.ECS_SERVICE }} \
+              --task-definition $PREV_TASK_DEF \
+              --force-new-deployment
+
+            aws ecs wait services-stable \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --services ${{ env.ECS_SERVICE }}
+
+            echo "✅ Rollback completed successfully"
+          else
+            echo "⚠️ No previous task definition found for rollback"
+          fi
+
+      - name: Notify rollback
+        if: always()
+        run: |
+          echo "🔄 Deployment rollback initiated for ${{ env.ECS_SERVICE }}"
