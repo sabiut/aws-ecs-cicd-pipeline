@@ -23,7 +23,11 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: ${{ secrets.ECR_FRONTEND_REPOSITORY }}
   ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
-  ECS_SERVICE: ${{ secrets.ECS_FRONTEND_SERVICE }}
+  ECS_BLUE_SERVICE: ${{ secrets.ECS_FRONTEND_BLUE_SERVICE }}
+  ECS_GREEN_SERVICE: ${{ secrets.ECS_FRONTEND_GREEN_SERVICE }}
+  ALB_TARGET_GROUP_BLUE: ${{ secrets.ALB_FRONTEND_BLUE_TARGET_GROUP }}
+  ALB_TARGET_GROUP_GREEN: ${{ secrets.ALB_FRONTEND_GREEN_TARGET_GROUP }}
+  ALB_LISTENER_ARN: ${{ secrets.ALB_LISTENER_ARN }}
   FRONTEND_REPO: 'sabiut/aws-ecs-frontend-react'
 
 permissions:
@@ -147,9 +151,12 @@ jobs:
           sarif_file: 'trivy-results.sarif'
 
   deploy:
-    name: Deploy to ECS
+    name: Blue/Green Deploy to ECS
     needs: build-and-push
     runs-on: ubuntu-latest
+    outputs:
+      active-color: ${{ steps.deployment.outputs.active-color }}
+      inactive-color: ${{ steps.deployment.outputs.inactive-color }}
     steps:
       - name: Checkout CI/CD repository
         uses: actions/checkout@v4
@@ -160,10 +167,39 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Determine active/inactive environments
+        id: determine-env
+        run: |
+          # Check which target group is currently active in the ALB listener
+          CURRENT_TARGET_GROUP=$(aws elbv2 describe-listeners \
+            --listener-arns ${{ env.ALB_LISTENER_ARN }} \
+            --query 'Listeners[0].DefaultActions[0].TargetGroupArn' \
+            --output text)
+
+          echo "Current target group: $CURRENT_TARGET_GROUP"
+
+          if [[ "$CURRENT_TARGET_GROUP" == *"blue"* ]]; then
+            echo "ACTIVE_COLOR=blue" >> $GITHUB_ENV
+            echo "INACTIVE_COLOR=green" >> $GITHUB_ENV
+            echo "ACTIVE_SERVICE=${{ env.ECS_BLUE_SERVICE }}" >> $GITHUB_ENV
+            echo "INACTIVE_SERVICE=${{ env.ECS_GREEN_SERVICE }}" >> $GITHUB_ENV
+            echo "ACTIVE_TARGET_GROUP=${{ env.ALB_TARGET_GROUP_BLUE }}" >> $GITHUB_ENV
+            echo "INACTIVE_TARGET_GROUP=${{ env.ALB_TARGET_GROUP_GREEN }}" >> $GITHUB_ENV
+          else
+            echo "ACTIVE_COLOR=green" >> $GITHUB_ENV
+            echo "INACTIVE_COLOR=blue" >> $GITHUB_ENV
+            echo "ACTIVE_SERVICE=${{ env.ECS_GREEN_SERVICE }}" >> $GITHUB_ENV
+            echo "INACTIVE_SERVICE=${{ env.ECS_BLUE_SERVICE }}" >> $GITHUB_ENV
+            echo "ACTIVE_TARGET_GROUP=${{ env.ALB_TARGET_GROUP_GREEN }}" >> $GITHUB_ENV
+            echo "INACTIVE_TARGET_GROUP=${{ env.ALB_TARGET_GROUP_BLUE }}" >> $GITHUB_ENV
+          fi
+
+          echo "Active: $ACTIVE_COLOR, Inactive: $INACTIVE_COLOR"
+
       - name: Download task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_SERVICE }} \
+            --task-definition ${{ env.INACTIVE_SERVICE }} \
             --query taskDefinition > task-definition.json
 
       - name: Update task definition with new image
@@ -174,24 +210,77 @@ jobs:
           container-name: frontend
           image: ${{ needs.build-and-push.outputs.image-tag }}
 
-      - name: Deploy to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Verify deployment
+      - name: Deploy to inactive environment
+        id: deployment
         run: |
+          echo "Deploying to inactive environment: ${{ env.INACTIVE_COLOR }}"
+
+          # Update the inactive service with new task definition
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.INACTIVE_SERVICE }} \
+            --task-definition ${{ steps.task-def.outputs.task-definition }} \
+            --desired-count 1 \
+            --force-new-deployment
+
+          # Wait for service to be stable
+          echo "Waiting for ${{ env.INACTIVE_SERVICE }} to be stable..."
           aws ecs wait services-stable \
             --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }}
+            --services ${{ env.INACTIVE_SERVICE }}
+
+          echo "active-color=${{ env.ACTIVE_COLOR }}" >> $GITHUB_OUTPUT
+          echo "inactive-color=${{ env.INACTIVE_COLOR }}" >> $GITHUB_OUTPUT
+
+      - name: Health check inactive environment
+        run: |
+          echo "Performing health check on ${{ env.INACTIVE_COLOR }} environment"
+
+          # Get ALB DNS name
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --load-balancer-arns $(aws elbv2 describe-target-groups \
+              --target-group-arns ${{ env.INACTIVE_TARGET_GROUP }} \
+              --query 'TargetGroups[0].LoadBalancerArns[0]' \
+              --output text) \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+
+          # Wait for targets to be healthy
+          echo "Checking target health for ${{ env.INACTIVE_TARGET_GROUP }}"
+          aws elbv2 wait target-in-service \
+            --target-group-arn ${{ env.INACTIVE_TARGET_GROUP }}
+
+          echo "Health check passed for ${{ env.INACTIVE_COLOR }} environment"
+
+      - name: Switch traffic to new environment
+        run: |
+          echo "Switching traffic from ${{ env.ACTIVE_COLOR }} to ${{ env.INACTIVE_COLOR }}"
+
+          # Update ALB listener to point to the new environment
+          aws elbv2 modify-listener \
+            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ env.INACTIVE_TARGET_GROUP }}
+
+          echo "Traffic switched to ${{ env.INACTIVE_COLOR }} environment"
+
+      - name: Scale down old environment
+        run: |
+          echo "Scaling down old ${{ env.ACTIVE_COLOR }} environment"
+
+          # Scale down the previously active service
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ACTIVE_SERVICE }} \
+            --desired-count 0
+
+          echo "Old environment scaled down"
 
       - name: Notify deployment success
         if: success()
         run: |
-          echo "Frontend deployed successfully to ${{ env.ECS_SERVICE }}"
+          echo "Frontend deployed successfully using blue/green strategy"
+          echo "Previous active: ${{ env.ACTIVE_COLOR }}"
+          echo "New active: ${{ env.INACTIVE_COLOR }}"
           echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
 
       - name: Invalidate CloudFront cache (if applicable)
@@ -208,7 +297,7 @@ jobs:
           fi
 
   rollback:
-    name: Rollback on Failure
+    name: Instant Rollback on Failure
     needs: [build-and-push, deploy]
     runs-on: ubuntu-latest
     if: failure()
@@ -219,32 +308,55 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get previous task definition
+      - name: Instant rollback via traffic switch
         run: |
-          PREV_TASK_DEF=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].previousTaskDefinition' \
+          echo "Performing instant rollback by switching traffic back"
+
+          # Determine current environment state
+          CURRENT_TARGET_GROUP=$(aws elbv2 describe-listeners \
+            --listener-arns ${{ env.ALB_LISTENER_ARN }} \
+            --query 'Listeners[0].DefaultActions[0].TargetGroupArn' \
             --output text)
 
-          if [ "$PREV_TASK_DEF" != "None" ]; then
-            echo "Rolling back to: $PREV_TASK_DEF"
-            aws ecs update-service \
-              --cluster ${{ env.ECS_CLUSTER }} \
-              --service ${{ env.ECS_SERVICE }} \
-              --task-definition $PREV_TASK_DEF \
-              --force-new-deployment
-
-            aws ecs wait services-stable \
-              --cluster ${{ env.ECS_CLUSTER }} \
-              --services ${{ env.ECS_SERVICE }}
-
-            echo "Rollback completed successfully"
+          # Switch back to the previous environment
+          if [[ "$CURRENT_TARGET_GROUP" == *"blue"* ]]; then
+            echo "Switching back to green environment"
+            ROLLBACK_TARGET_GROUP=${{ env.ALB_TARGET_GROUP_GREEN }}
+            ROLLBACK_SERVICE=${{ env.ECS_GREEN_SERVICE }}
+            FAILED_SERVICE=${{ env.ECS_BLUE_SERVICE }}
           else
-            echo "No previous task definition found for rollback"
+            echo "Switching back to blue environment"
+            ROLLBACK_TARGET_GROUP=${{ env.ALB_TARGET_GROUP_BLUE }}
+            ROLLBACK_SERVICE=${{ env.ECS_BLUE_SERVICE }}
+            FAILED_SERVICE=${{ env.ECS_GREEN_SERVICE }}
           fi
+
+          # Ensure rollback environment is running
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service $ROLLBACK_SERVICE \
+            --desired-count 1
+
+          # Wait for rollback service to be stable
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services $ROLLBACK_SERVICE
+
+          # Switch traffic back immediately
+          aws elbv2 modify-listener \
+            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=$ROLLBACK_TARGET_GROUP
+
+          # Scale down failed deployment
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service $FAILED_SERVICE \
+            --desired-count 0
+
+          echo "Instant rollback completed successfully"
 
       - name: Notify rollback
         if: always()
         run: |
-          echo "Deployment rollback initiated for ${{ env.ECS_SERVICE }}"
+          echo "Blue/green deployment rollback completed"
+          echo "Traffic switched back to previous stable environment"
