@@ -40,13 +40,13 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 
-EXPOSE 8080
+EXPOSE 3000
 
-ENV PORT=8080
+ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/api/health || exit 1
+    CMD curl -f http://localhost:3000/api/health || exit 1
 
 CMD ["node", "server.js"]

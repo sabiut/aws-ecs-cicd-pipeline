@@ -22,6 +22,7 @@ on:
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: ${{ secrets.ECR_FRONTEND_REPOSITORY }}
+  ECR_NGINX_REPOSITORY: ${{ secrets.ECR_FRONTEND_NGINX_REPOSITORY }}
   ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
   ECS_BLUE_SERVICE: ${{ secrets.ECS_FRONTEND_BLUE_SERVICE }}
   ECS_GREEN_SERVICE: ${{ secrets.ECS_FRONTEND_GREEN_SERVICE }}
@@ -84,6 +85,8 @@ jobs:
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
+      nginx-image-tag: ${{ steps.nginx-meta.outputs.tags }}
+      nginx-image-digest: ${{ steps.nginx-build.outputs.digest }}
     steps:
       - name: Checkout CI/CD repository
         uses: actions/checkout@v4
@@ -120,7 +123,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value={{date 'YYYYMMDD-HHmmss'}}
 
-      - name: Build and push Docker image
+      - name: Build and push frontend Docker image
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -136,6 +139,30 @@ jobs:
             BUILD_DATE=${{ github.run_id }}
             VCS_REF=${{ github.sha }}
             NODE_ENV=production
+
+      - name: Docker meta for nginx
+        id: nginx-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_NGINX_REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value={{date 'YYYYMMDD-HHmmss'}}
+
+      - name: Build and push nginx Docker image
+        id: nginx-build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/nginx/frontend/Dockerfile
+          push: true
+          tags: ${{ steps.nginx-meta.outputs.tags }}
+          labels: ${{ steps.nginx-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
@@ -196,19 +223,33 @@ jobs:
 
           echo "Active: $ACTIVE_COLOR, Inactive: $INACTIVE_COLOR"
 
-      - name: Download task definition
+      - name: Create task definition from template
         run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.INACTIVE_SERVICE }} \
-            --query taskDefinition > task-definition.json
+          # Set environment variables for template substitution
+          export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          export TASK_FAMILY="${{ env.INACTIVE_SERVICE }}"
+          export IMAGE_URI="${{ needs.build-and-push.outputs.image-tag }}"
+          export NGINX_IMAGE_URI="${{ needs.build-and-push.outputs.nginx-image-tag }}"
+          export PROJECT_NAME="ecs-three-tier"
+          export ENVIRONMENT="dev"
 
-      - name: Update task definition with new image
+          # Generate task definition from template
+          envsubst < task-definitions/frontend.json > task-definition.json
+
+          # Debug: Show the generated task definition
+          echo "Generated task definition:"
+          cat task-definition.json
+
+      - name: Register new task definition
         id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: frontend
-          image: ${{ needs.build-and-push.outputs.image-tag }}
+        run: |
+          # Register the new task definition
+          TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "task-definition-arn=$TASK_DEFINITION_ARN" >> $GITHUB_OUTPUT
 
       - name: Deploy to inactive environment
         id: deployment
@@ -219,7 +260,7 @@ jobs:
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.INACTIVE_SERVICE }} \
-            --task-definition ${{ steps.task-def.outputs.task-definition }} \
+            --task-definition ${{ steps.task-def.outputs.task-definition-arn }} \
             --desired-count 1 \
             --force-new-deployment
 

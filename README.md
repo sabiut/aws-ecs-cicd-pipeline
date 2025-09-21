@@ -70,16 +70,26 @@ graph TD
 .
 ├── .github/
 │   └── workflows/
-│       ├── backend-deploy.yml    # Backend deployment workflow
-│       └── frontend-deploy.yml   # Frontend deployment workflow
+│       ├── backend-deploy.yml    # Backend blue/green deployment workflow
+│       └── frontend-deploy.yml   # Frontend blue/green deployment workflow
 ├── docker/
 │   ├── backend/
-│   │   ├── Dockerfile
+│   │   ├── Dockerfile           # Django backend container
 │   │   └── requirements.txt
-│   └── frontend/
-│       ├── Dockerfile
-│       ├── package.json
-│       └── next.config.js
+│   ├── frontend/
+│   │   ├── Dockerfile           # Next.js frontend container
+│   │   ├── package.json
+│   │   └── next.config.js
+│   └── nginx/
+│       ├── backend/
+│       │   ├── Dockerfile       # Nginx reverse proxy for backend
+│       │   └── nginx.conf
+│       └── frontend/
+│           ├── Dockerfile       # Nginx reverse proxy for frontend
+│           └── nginx.conf
+├── task-definitions/
+│   ├── frontend.json            # Frontend task definition template
+│   └── backend.json             # Backend task definition template
 ├── terraform/
 │   ├── main.tf
 │   ├── variables.tf
@@ -128,9 +138,19 @@ The Terraform will output the required secrets. Add these to your repositories:
 - `AWS_ROLE_ARN`
 - `ECS_CLUSTER`
 - `ECR_FRONTEND_REPOSITORY`
+- `ECR_FRONTEND_NGINX_REPOSITORY`
 - `ECR_BACKEND_REPOSITORY`
-- `ECS_FRONTEND_SERVICE`
-- `ECS_BACKEND_SERVICE`
+- `ECR_BACKEND_NGINX_REPOSITORY`
+- `ECS_FRONTEND_BLUE_SERVICE`
+- `ECS_FRONTEND_GREEN_SERVICE`
+- `ECS_BACKEND_BLUE_SERVICE`
+- `ECS_BACKEND_GREEN_SERVICE`
+- `ALB_FRONTEND_BLUE_TARGET_GROUP`
+- `ALB_FRONTEND_GREEN_TARGET_GROUP`
+- `ALB_BACKEND_BLUE_TARGET_GROUP`
+- `ALB_BACKEND_GREEN_TARGET_GROUP`
+- `ALB_LISTENER_ARN`
+- `ALB_BACKEND_LISTENER_RULE_ARN`
 
 **Application Repository Secrets:**
 - `CICD_TRIGGER_TOKEN`: GitHub token with repository dispatch permissions
@@ -149,20 +169,65 @@ Application repositories are already configured with trigger workflows that auto
 4. **CI/CD workflow** automatically activates in this repository:
    - Checks out code from application repository
    - Uses centralized Dockerfiles and build configs
-   - Builds and pushes Docker image to ECR
-   - Deploys to ECS Fargate
-   - Performs health checks and rollback if needed
+   - Builds and pushes both application and nginx Docker images to ECR
+   - Creates dynamic task definitions with new images
+   - Deploys using blue/green strategy to ECS Fargate
+   - Performs health checks and instant rollback if needed
 
 **No manual intervention required** - the entire process is automated once secrets are configured.
 
-### **Deployment Process:**
+### **Blue/Green Deployment Process:**
 1. **Test**: Run linting and tests on application code
-2. **Build**: Create Docker image using centralized configs
+2. **Build**: Create both application and nginx Docker images using centralized configs
 3. **Scan**: Security vulnerability scanning
-4. **Push**: Upload to Amazon ECR
-5. **Deploy**: Update ECS service with new image
-6. **Verify**: Health check validation
-7. **Rollback**: Automatic rollback on failure
+4. **Push**: Upload images to Amazon ECR
+5. **Deploy**: Deploy to inactive environment (blue/green)
+6. **Health Check**: Validate new deployment health
+7. **Traffic Switch**: Switch ALB traffic to new environment
+8. **Scale Down**: Scale down old environment
+9. **Instant Rollback**: Immediate traffic switch back on failure
+
+## Architecture Overview
+
+### **Container Architecture**
+
+Each ECS task runs two containers:
+
+```
+┌─────────────────────────────┐
+│        ECS Task             │
+├─────────────────────────────┤
+│ nginx:8080 ◄─── ALB Traffic │
+│    ▲                        │
+│    │ (reverse proxy)        │
+│    ▼                        │
+│ App:3000/8000               │
+│ (Next.js/Django)            │
+└─────────────────────────────┘
+```
+
+### **Frontend Architecture:**
+- **nginx container**: Reverse proxy on port 8080
+- **Next.js container**: Application server on port 3000
+- **Health checks**: Both containers monitored
+- **Dependencies**: nginx waits for Next.js to be healthy
+
+### **Backend Architecture:**
+- **nginx container**: Reverse proxy on port 8080
+- **Django container**: Application server on port 8000 (gunicorn)
+- **Health checks**: Both containers monitored
+- **Dependencies**: nginx waits for Django to be healthy
+
+### **Task Definition Templates**
+
+Task definitions are created dynamically from templates in `task-definitions/` with environment substitution:
+
+- `${TASK_FAMILY}` - ECS service name (blue/green specific)
+- `${IMAGE_URI}` - Application Docker image from ECR
+- `${NGINX_IMAGE_URI}` - nginx Docker image from ECR
+- `${AWS_ACCOUNT_ID}` - AWS account ID
+- `${PROJECT_NAME}` - Project name (ecs-three-tier)
+- `${ENVIRONMENT}` - Environment (dev/staging/prod)
 
 ## Environment Configuration
 
