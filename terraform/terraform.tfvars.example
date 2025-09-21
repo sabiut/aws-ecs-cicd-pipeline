@@ -1,8 +1,8 @@
 # AWS Configuration
 aws_region = "ap-southeast-2"
 
-# Project Configuration
-project_name = "my-app"
+# Project Configuration (must match your existing ECS infrastructure)
+project_name = "ecs-three-tier"
 environment  = "dev"
 
 # GitHub Configuration
@@ -11,9 +11,9 @@ github_frontend_repo = "aws-ecs-frontend-react"
 github_backend_repo  = "aws-ecs-backend-django"
 
 # ECS Configuration (must match your existing ECS infrastructure)
-ecs_cluster_name          = "my-app-dev-cluster"
-ecs_frontend_service_name = "my-app-dev-frontend"
-ecs_backend_service_name  = "my-app-dev-backend"
+ecs_cluster_name          = "ecs-three-tier-dev-cluster"
+ecs_frontend_service_name = "ecs-three-tier-dev-frontend"
+ecs_backend_service_name  = "ecs-three-tier-dev-backend"
 
 # ECR Configuration
 ecr_image_retention_count = 10

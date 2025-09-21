@@ -42,10 +42,11 @@ graph TD
 
 ## Prerequisites
 
-1. AWS Account with appropriate permissions
-2. GitHub repositories for frontend and backend applications
-3. Terraform installed (>= 1.0)
-4. AWS CLI configured
+1. **Existing ECS Infrastructure**: This CI/CD pipeline deploys to existing ECS services created by [terraform-aws-ecs-infra](https://github.com/sabiut/terraform-aws-ecs-infra)
+2. AWS Account with appropriate permissions
+3. GitHub repositories for frontend and backend applications
+4. Terraform installed (>= 1.0)
+5. AWS CLI configured
 
 ## Setup Instructions
 
@@ -55,7 +56,15 @@ graph TD
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
 # Edit terraform.tfvars with your configuration
+# IMPORTANT: Use the same project_name and environment as your existing ECS infrastructure
 ```
+
+**Key Configuration:**
+- `project_name`: Must match your existing ECS infrastructure (default: "ecs-three-tier")
+- `environment`: Must match your existing ECS infrastructure (default: "dev")
+- `ecs_cluster_name`: Must match your existing ECS cluster name
+- `ecs_frontend_service_name`: Must match your existing frontend service name
+- `ecs_backend_service_name`: Must match your existing backend service name
 
 ### 2. Deploy CI/CD Infrastructure
 
@@ -182,17 +191,20 @@ Manual rollback:
 
 ## Related Repositories
 
-This CI/CD infrastructure works with the following application repositories:
+This CI/CD infrastructure works with the following repositories:
 
+- **ECS Infrastructure**: [terraform-aws-ecs-infra](https://github.com/sabiut/terraform-aws-ecs-infra) (deploy this first)
 - **CI/CD Pipeline**: [aws-ecs-cicd-pipeline](https://github.com/sabiut/aws-ecs-cicd-pipeline) (this repository)
 - **Django Backend**: [aws-ecs-backend-django](https://github.com/sabiut/aws-ecs-backend-django)
 - **Next.js Frontend**: [aws-ecs-frontend-react](https://github.com/sabiut/aws-ecs-frontend-react)
 
 ## Complete Setup
 
-1. **Deploy this CI/CD infrastructure first**
-2. **Configure GitHub secrets** for both application repositories
-3. **Push to application repositories** to trigger deployments
+**Deployment Order:**
+1. **Deploy ECS Infrastructure** from [terraform-aws-ecs-infra](https://github.com/sabiut/terraform-aws-ecs-infra) first
+2. **Deploy this CI/CD infrastructure** (configure with matching ECS names)
+3. **Configure GitHub secrets** for both application repositories
+4. **Push to application repositories** to trigger deployments
 
 ## Contributing
 
