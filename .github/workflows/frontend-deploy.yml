@@ -184,7 +184,7 @@ jobs:
       - name: Notify deployment success
         if: success()
         run: |
-          echo "✅ Frontend deployed successfully to ${{ env.ECS_SERVICE }}"
+          echo "Frontend deployed successfully to ${{ env.ECS_SERVICE }}"
           echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
           echo "Digest: ${{ needs.build-and-push.outputs.image-digest }}"
 
@@ -197,9 +197,9 @@ jobs:
             aws cloudfront create-invalidation \
               --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
               --paths "/*"
-            echo "✅ CloudFront cache invalidated"
+            echo "CloudFront cache invalidated"
           else
-            echo "ℹ️ No CloudFront distribution configured"
+            echo "No CloudFront distribution configured"
           fi
 
   rollback:
@@ -234,12 +234,12 @@ jobs:
               --cluster ${{ env.ECS_CLUSTER }} \
               --services ${{ env.ECS_SERVICE }}
 
-            echo "✅ Rollback completed successfully"
+            echo "Rollback completed successfully"
           else
-            echo "⚠️ No previous task definition found for rollback"
+            echo "No previous task definition found for rollback"
           fi
 
       - name: Notify rollback
         if: always()
         run: |
-          echo "🔄 Deployment rollback initiated for ${{ env.ECS_SERVICE }}"
+          echo "Deployment rollback initiated for ${{ env.ECS_SERVICE }}"

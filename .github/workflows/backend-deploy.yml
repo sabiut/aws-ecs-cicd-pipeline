@@ -180,7 +180,7 @@ jobs:
       - name: Notify deployment success
         if: success()
         run: |
-          echo "✅ Backend deployed successfully to ${{ env.ECS_SERVICE }}"
+          echo "Backend deployed successfully to ${{ env.ECS_SERVICE }}"
           echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
           echo "Digest: ${{ needs.build-and-push.outputs.image-digest }}"
 
@@ -216,12 +216,12 @@ jobs:
               --cluster ${{ env.ECS_CLUSTER }} \
               --services ${{ env.ECS_SERVICE }}
 
-            echo "✅ Rollback completed successfully"
+            echo "Rollback completed successfully"
           else
-            echo "⚠️ No previous task definition found for rollback"
+            echo "No previous task definition found for rollback"
           fi
 
       - name: Notify rollback
         if: always()
         run: |
-          echo "🔄 Deployment rollback initiated for ${{ env.ECS_SERVICE }}"
+          echo "Deployment rollback initiated for ${{ env.ECS_SERVICE }}"
